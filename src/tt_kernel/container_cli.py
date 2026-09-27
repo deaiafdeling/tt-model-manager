@@ -823,6 +823,9 @@ def load_pulled(repo_id: str) -> Optional[Manifest]:
     path = pull_dir(repo_id) / MANIFEST_NAME
     if not path.is_file():
         return None
+    entry = localdb.get(repo_id)
+    if entry is not None and not entry.get("container"):
+        return None  # a later v5/v6 pull re-recorded this repo; that install wins
     try:
         m = Manifest.from_json(path.read_text())
     except ValueError:

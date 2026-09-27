@@ -2825,3 +2825,28 @@ def test_package_emits_the_card_warning_at_its_call_site(
     container_cli.package_container(str(tmp_path / "tt-model.yaml"))
     printed = capsys.readouterr().out
     assert ("the model card has no card." in printed) is warned, printed
+
+
+# ------------------------------------------- a later v6 pull supersedes a pulled container
+
+
+def test_serve_prefers_a_later_v6_install_over_a_stale_pulled_container(tmp_path, monkeypatch):
+    """A repo republished as a v6 bundle leaves the old pulled container manifest behind.
+    The v6 pull re-records the repo in localdb, and that newest record must win."""
+    from tt_kernel import cli, localdb
+
+    d = container_cli.pull_dir("org/x")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "tt_kernel_manifest.json").write_text(_manifest(tmp_path).to_json())
+    localdb.record("org/x", {"repo_id": "org/x", "self_contained": True,
+                             "install_dir": str(tmp_path), "run_script": str(tmp_path / "run.sh")})
+    served = []
+    monkeypatch.setattr(cli, "_serve_self_contained",
+                        lambda entry, **kw: served.append(entry["repo_id"]))
+    monkeypatch.setattr(container_cli, "serve_container",
+                        lambda *a, **k: pytest.fail("served the stale container"))
+
+    res = runner.invoke(cli.app, ["serve", "org/x", "--local-only"])
+    assert res.exit_code == 0, res.output
+    assert served == ["org/x"]
+    assert container_cli.resolve_target("org/x") is None
