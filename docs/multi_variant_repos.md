@@ -186,9 +186,11 @@ add a third location.
 Ports already move apart: both paths walk upward from 20000. Chips need two fixes in progress
 separately:
 
-- a v6 `run.sh` that uses the chips it is granted instead of defaulting to chip 0;
+- a v6 `run.sh` that uses the chips it is granted instead of defaulting to chip 0 (#154);
 - a container serve whose free-chip scan also sees host processes (a v6 server) that hold
-  `/dev/tenstorrent/*`.
+  `/dev/tenstorrent/*` (#155).
+
+`stop` also needs to reach a v6 server, which is a host process rather than a container (#152).
 
 Until both land, run two variants side by side only on chips pinned by hand (`--device-id` for
 the container, `TT_METAL_VISIBLE_DEVICES` for v6).
