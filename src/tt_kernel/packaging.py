@@ -563,8 +563,31 @@ def render_run_sh(manifest: Manifest) -> str:
     is_dit_kind = manifest.deps is not None and manifest.deps.kind != "vllm"
     weights = manifest.weights.repo_id if manifest.weights else ""
     mesh_device = (manifest.mesh.topology if manifest.mesh and manifest.mesh.topology else "") or ""
+    author_env = dict(manifest.env or {})
+    # Chips: the operator's TT_METAL_VISIBLE_DEVICES, else the first N of a TT_VISIBLE_DEVICES
+    # grant (e.g. gozer's), else the author's --env value, else 0..N-1.
+    nchips = max(int(manifest.device_count or 1), 1)
+    first_n = ",".join(str(i) for i in range(nchips))
+    default_chips = author_env.pop("TT_METAL_VISIBLE_DEVICES", None) or first_n
+    chips_block = f"""NCHIPS={nchips}
+if [ -z "${{TT_METAL_VISIBLE_DEVICES:-}}" ]; then
+  if [ -n "${{TT_VISIBLE_DEVICES:-}}" ]; then
+    IFS=, read -ra _GRANT <<< "$TT_VISIBLE_DEVICES"
+    if [ "${{#_GRANT[@]}}" -lt "$NCHIPS" ]; then
+      echo "run.sh: this model needs $NCHIPS chip(s) but TT_VISIBLE_DEVICES grants ${{#_GRANT[@]}} ($TT_VISIBLE_DEVICES)" >&2
+      exit 1
+    fi
+    TT_VISIBLE_DEVICES="$(IFS=,; echo "${{_GRANT[*]:0:$NCHIPS}}")"
+    export TT_VISIBLE_DEVICES
+    TT_METAL_VISIBLE_DEVICES="{first_n}"
+  else
+    TT_METAL_VISIBLE_DEVICES="{default_chips}"
+  fi
+fi
+export TT_METAL_VISIBLE_DEVICES
+"""
     extra_env = "".join(
-        f'export {k}="{v}"\n' for k, v in (manifest.env or {}).items()
+        f'export {k}="{v}"\n' for k, v in author_env.items()
     )
     # The tt_transformers adapter reads HF_MODEL from the env (not vLLM's --model), so export it.
     hf_export = f'export HF_MODEL="${{HF_MODEL:-{weights}}}"\n' if weights else ""
@@ -663,8 +686,7 @@ export TT_VLLM_BUILTIN_MODELS=0
 # + model registry load via entry points without it.
 export PYTHONPATH="{pythonpath_entry}:${{PYTHONPATH:-}}"   # resolves the adapter/model imports
 export MESH_DEVICE="${{MESH_DEVICE:-{mesh_device}}}"
-export TT_METAL_VISIBLE_DEVICES="${{TT_METAL_VISIBLE_DEVICES:-0}}"
-# HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall, so serving writes and reads
+{chips_block}# HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall, so serving writes and reads
 # nothing outside it (the ttnn tensor cache even DEFAULTS to a hard-coded /mnt/... path upstream —
 # a classic other-machine leak we must override). Each is overridable if the operator sets it.
 export HF_HOME="${{HF_HOME:-$HERE/.hf}}"                  # HF weights + hub cache
