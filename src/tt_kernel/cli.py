@@ -1013,7 +1013,7 @@ def _materialize_and_record(
             # A user who pre-staged weights keeps them across a reinstall (resumable from the HF
             # cache) instead of silently dropping them and refetching at load time.
             typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
-            weights_path = runtime.download_weights(manifest.weights, dest / "weights")
+            weights_path = runtime.download_weights(manifest.weights, runtime.serve_hub_cache(dest))
 
         run_script = dest / ((manifest.bundled.run_script if manifest.bundled else None) or "run.sh")
         localdb.record(repo_id, {
