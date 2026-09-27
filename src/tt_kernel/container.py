@@ -429,8 +429,35 @@ def _claimed_from_container(info: dict, all_ids: Sequence[int], *,
     return ids
 
 
+def _host_claimed_devices(proc_root: Path = Path("/proc")) -> Set[int]:
+    """Chip ids a host process holds open (a ``/proc/<pid>/fd`` link to ``/dev/tenstorrent/N``).
+
+    Covers what docker cannot see, chiefly a v5/v6 bundle server, which is a plain host
+    process. Best-effort: an unreadable or vanished process is skipped, never an error.
+    """
+    ids: Set[int] = set()
+    try:
+        pids = [p for p in proc_root.iterdir() if p.name.isdigit()]
+    except OSError:
+        return ids
+    for pid in pids:
+        try:
+            fds = list((pid / "fd").iterdir())
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                m = _TT_NODE_RE.match(os.readlink(fd))
+            except OSError:
+                continue
+            if m:
+                ids.add(int(m.group(1)))
+    return ids
+
+
 def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
-    """Chip ids already claimed by ANY running container, or None on a scan failure.
+    """Chip ids already claimed by ANY running container or host process, or None on a scan
+    failure.
 
     Host-wide by design, not scoped to ``label={LABEL}``: the UMD lock this whole scheme
     protects against is shared through ``--ipc host`` regardless of who launched the other
@@ -446,7 +473,7 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
             return None
         ids = ps.stdout.split()
         if not ids:
-            return set()
+            return _host_claimed_devices()
         inspected = _run(["docker", "inspect", *ids], capture_output=True, text=True)
         if inspected.returncode != 0:
             return None
@@ -465,7 +492,7 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
     for info in containers:
         claimed |= _claimed_from_container(
             info, all_ids, host_ipc=_shares_host_ipc(info, by_id))
-    return claimed
+    return claimed | _host_claimed_devices()
 
 
 def all_device_ids(dev_root: Optional[Path] = None) -> List[int]:
