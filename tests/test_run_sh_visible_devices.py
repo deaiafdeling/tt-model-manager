@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-"""run.sh chip selection: honour the operator, then a gozer grant, then the author, then 0..N-1.
+"""run.sh chip selection: honour the operator, then a TT_VISIBLE_DEVICES grant, then the author, then 0..N-1.
 
 Runs the real rendered run.sh with a stand-in interpreter that reports the chip env the
 server would have started with.

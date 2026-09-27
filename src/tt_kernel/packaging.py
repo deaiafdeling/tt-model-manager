@@ -565,7 +565,7 @@ def render_run_sh(manifest: Manifest) -> str:
     mesh_device = (manifest.mesh.topology if manifest.mesh and manifest.mesh.topology else "") or ""
     author_env = dict(manifest.env or {})
     # Chips: the operator's TT_METAL_VISIBLE_DEVICES, else the first N of a TT_VISIBLE_DEVICES
-    # grant (e.g. gozer's), else the author's --env value, else 0..N-1.
+    # grant (from whatever scheduler launched us), else the author's --env value, else 0..N-1.
     nchips = max(int(manifest.device_count or 1), 1)
     first_n = ",".join(str(i) for i in range(nchips))
     default_chips = author_env.pop("TT_METAL_VISIBLE_DEVICES", None) or first_n
