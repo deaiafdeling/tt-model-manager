@@ -1195,6 +1195,10 @@ def _refresh_self_contained(
                     fg=typer.colors.YELLOW, err=True)
 
 
+# serve writes the server's PID here (inside the install folder) so `tt-model stop` can find it.
+SERVE_PID_FILE = ".serve.pid"
+
+
 def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None) -> None:
     """Serve a v5 self-contained bundle by running its own ``run.sh`` in its own venv.
 
@@ -1212,10 +1216,56 @@ def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional
         # resolved command + env instead of the bare `bash run.sh` line.
         subprocess.run(argv, env={**os.environ, "TT_MODEL_PRINT": "1"})
         return
+    # run.sh execs the server, so the PID bash writes here is the server's own.
+    pid_file = Path(run_script).parent / SERVE_PID_FILE
+    argv = ["bash", "-c", 'echo $$ > "$0" && exec "$@"', str(pid_file), *argv]
     try:
         raise typer.Exit(code=subprocess.run(argv).returncode)
     except KeyboardInterrupt:
         raise typer.Exit(code=130)
+    finally:
+        pid_file.unlink(missing_ok=True)
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while ``pid`` is running (a zombie awaiting its parent's reap counts as gone)."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def _stop_self_contained(entry: dict) -> None:
+    """SIGTERM the server ``serve`` recorded for this install, SIGKILL after the grace period."""
+    import signal
+    import time
+
+    install = Path(entry.get("install_dir") or entry.get("bundle_path") or "")
+    pid_file = install / SERVE_PID_FILE
+    try:
+        pid = int(pid_file.read_text().strip())
+        # Guard against a recycled PID: the server's command line runs from this install.
+        ours = str(install) in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
+    except (OSError, ValueError):
+        ours = False
+    if not ours:
+        pid_file.unlink(missing_ok=True)
+        console.note("nothing running", marker="○")
+        return
+    with console.step(f"stopping {entry.get('repo_id')} (pid {pid})") as st:
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + container.STOP_TIMEOUT_S
+        while _pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        clean = not _pid_alive(pid)
+        if not clean:
+            os.kill(pid, signal.SIGKILL)
+        st.detail("clean" if clean else "killed")
+    pid_file.unlink(missing_ok=True)
+    if not clean:
+        console.note("the server did not exit on SIGTERM and was killed; the chips may need a "
+                     "reset before the next serve", marker="⚠", style="warning")
+    console.milestone(f"stopped {entry.get('repo_id')}")
 
 
 @app.command(rich_help_panel="Environment")
@@ -1907,16 +1957,21 @@ def _require_container(target: str):
 
 @app.command(rich_help_panel="Run a model")
 def stop(
-    target: str = typer.Argument(..., help="Container package: org/name, or a manifest path."),
+    target: str = typer.Argument(..., help="Package or bundle: org/name, or a manifest path."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Stop only this profile."),
 ) -> None:
-    """Stop a running container package, SIGTERM first.
+    """Stop a running container package or v5/v6 bundle server, SIGTERM first.
 
     A clean SIGTERM lets the server close the mesh on its way out. If the grace period
     expires and docker has to SIGKILL, the devices are left needing a reset — so the mesh
     is reset with tt-smi from a throwaway container, and you are told it happened.
     """
     from . import container_cli
+
+    entry = localdb.get(target)
+    if entry and entry.get("self_contained"):
+        _stop_self_contained(entry)
+        return
 
     try:
         container_cli.stop_container(_require_container(target), profile_name=profile)

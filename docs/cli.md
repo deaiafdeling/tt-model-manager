@@ -22,7 +22,7 @@ tt-model curl "hello"                              # send a chat completion to t
 tt-model curl "write a haiku" --temperature 0.7 --max-tokens 200
 tt-model curl "hello" --print                      # emit the equivalent curl instead of sending
 
-tt-model stop you/mymodel                          # container packages: stop the running server (SIGTERM first)
+tt-model stop you/mymodel                          # stop the running server (SIGTERM first; container or v5/v6 bundle)
 tt-model logs you/mymodel                          # container packages: show the server logs
 ```
 
