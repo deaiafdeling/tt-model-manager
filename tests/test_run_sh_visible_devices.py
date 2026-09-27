@@ -34,7 +34,7 @@ def _bundle(tmp_path, *, devices, env=None):
     py = b / "venv" / "bin" / "python"
     py.write_text(f'#!/bin/bash\n[ "$1" = -c ] && exec {sys.executable} "$@"\n'
                   'echo "TVD=${TT_VISIBLE_DEVICES:-} TMVD=${TT_METAL_VISIBLE_DEVICES:-}"\n')
-    py.chmod(0o755)
+    py.chmod(0o700)  # owner-only: the test is the only thing that runs it
     ttnn = tmp_path / "site" / "ttnn"
     (ttnn / "build" / "lib").mkdir(parents=True)
     (ttnn / "__init__.py").write_text("")
