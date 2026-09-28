@@ -741,6 +741,9 @@ def package_thin(
     mesh_topology: Optional[str] = typer.Option(None, "--mesh", help='Device topology, e.g. "P150" / "1x4".'),
     device_count: int = typer.Option(1, "--device-count"),
     python_version: str = typer.Option("3.12", "--python", help="Pinned interpreter (uv provisions)."),
+    tt_metal_version: Optional[str] = typer.Option(
+        None, "--tt-metal-version", help="Record this TT-Metalium version in the manifest. "
+        "Default: the exact ttnn (or tt-metal-models) pin in --requirements, else this host's."),
     max_num_seqs: Optional[int] = typer.Option(None, "--max-num-seqs"),
     block_size: Optional[int] = typer.Option(None, "--block-size"),
     max_model_len: Optional[int] = typer.Option(None, "--max-model-len"),
@@ -849,7 +852,12 @@ def package_thin(
         vllm_version=vllm_version, with_vllm=with_vllm,
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
         resources=resources, python_version=python_version,
-        tt_metal_version=metal.resolve_version() or "unknown",
+        tt_metal_version=(
+            tt_metal_version
+            or packaging.pinned_ttnn_version(Path(requirements).expanduser().read_text()
+                                             if requirements else "")
+            or metal.resolve_version() or "unknown"
+        ),
     )
     typer.secho(f"✓ Staged v6 thin bundle {manifest.name} at {staged}", fg=typer.colors.GREEN)
     typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
@@ -1020,7 +1028,7 @@ def _materialize_and_record(
             # A user who pre-staged weights keeps them across a reinstall (resumable from the HF
             # cache) instead of silently dropping them and refetching at load time.
             typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
-            weights_path = runtime.download_weights(manifest.weights, dest / "weights")
+            weights_path = runtime.download_weights(manifest.weights, runtime.serve_hub_cache(dest))
 
         run_script = dest / ((manifest.bundled.run_script if manifest.bundled else None) or "run.sh")
         localdb.record(repo_id, {
