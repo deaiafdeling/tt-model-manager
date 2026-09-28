@@ -788,6 +788,9 @@ def package_thin(
     model_path = Path(model_py).expanduser()
     if not model_path.is_file():
         raise _err(f"--model-py {model_py!r} is not a file.")
+    if model_path.name in packaging.THIN_RESERVED_NAMES:
+        raise _err(f"--model-py {model_path.name!r} has the same name as a file the bundle "
+                   "generates; rename the runner.")
     if kind not in THIN_KINDS:
         raise _err(f"--kind {kind!r} is not supported; use one of {THIN_KINDS}.")
     vmeta: Optional[dict] = None
@@ -892,7 +895,11 @@ def package_thin(
     if publish:
         tags.append(TT_MODEL_CATALOG_TAG)
     _ensure_repo(repo_id, private)  # private by default; never flips an existing repo silently
-    hub.push_folder(repo_id, staged, commit_message=f"tt-model package-thin {manifest.name} (v6 thin)")
+    try:
+        hub.push_folder(repo_id, staged, refuse_foreign=True,
+                        commit_message=f"tt-model package-thin {manifest.name} (v6 thin)")
+    except hub.ForeignFilesError as e:
+        raise _err(str(e))
     try:
         hub.tag_repo(repo_id, tags)
     except Exception as exc:  # tagging is best-effort
