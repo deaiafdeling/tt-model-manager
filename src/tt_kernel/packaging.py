@@ -566,11 +566,18 @@ def render_run_sh(manifest: Manifest) -> str:
     author_env = dict(manifest.env or {})
     # Chips: the operator's TT_METAL_VISIBLE_DEVICES, else the first N of a TT_VISIBLE_DEVICES
     # grant (from whatever scheduler launched us), else the author's --env value, else 0..N-1.
-    # The grant itself is left as granted: narrowing it to part of a p300c board makes tt-metal
-    # treat the visible set as a CUSTOM cluster and abort at mesh open.
+    # The grant is narrowed to the chips used (the vLLM plugin sizes its mesh from what is
+    # visible). One visible chip of a multi-chip Blackhole board is a CUSTOM cluster that
+    # tt-metal refuses to open without a mesh graph descriptor, so a 1-chip Blackhole bundle
+    # under a grant gets ttnn's own P150 one unless something already set it.
     nchips = max(int(manifest.device_count or 1), 1)
     first_n = ",".join(str(i) for i in range(nchips))
     default_chips = author_env.pop("TT_METAL_VISIBLE_DEVICES", None) or first_n
+    single_chip_desc = "" if nchips != 1 or manifest.arch != "blackhole" else """
+    _P150_MGD="$TTNN_DIR/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+    if [ -z "${TT_MESH_GRAPH_DESC_PATH:-}" ] && [ -f "$_P150_MGD" ]; then
+      export TT_MESH_GRAPH_DESC_PATH="$_P150_MGD"
+    fi"""
     chips_block = f"""NCHIPS={nchips}
 if [ -z "${{TT_METAL_VISIBLE_DEVICES:-}}" ]; then
   if [ -n "${{TT_VISIBLE_DEVICES:-}}" ]; then
@@ -579,7 +586,9 @@ if [ -z "${{TT_METAL_VISIBLE_DEVICES:-}}" ]; then
       echo "run.sh: this model needs $NCHIPS chip(s) but TT_VISIBLE_DEVICES grants ${{#_GRANT[@]}} ($TT_VISIBLE_DEVICES)" >&2
       exit 1
     fi
-    TT_METAL_VISIBLE_DEVICES="{first_n}"
+    TT_VISIBLE_DEVICES="$(IFS=,; echo "${{_GRANT[*]:0:$NCHIPS}}")"
+    export TT_VISIBLE_DEVICES
+    TT_METAL_VISIBLE_DEVICES="{first_n}"{single_chip_desc}
   else
     TT_METAL_VISIBLE_DEVICES="{default_chips}"
   fi
