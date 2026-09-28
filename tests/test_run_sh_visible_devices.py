@@ -36,7 +36,7 @@ def _bundle(tmp_path, *, devices, env=None, arch="blackhole", descriptor=True):
     py.write_text(f'#!/bin/bash\n[ "$1" = -c ] && exec {sys.executable} "$@"\n'
                   'echo "TVD=${TT_VISIBLE_DEVICES:-} TMVD=${TT_METAL_VISIBLE_DEVICES:-}"\n'
                   'echo "MGD=${TT_MESH_GRAPH_DESC_PATH:-}" >&2\n')
-    py.chmod(0o700)  # owner-only: the test is the only thing that runs it
+    py.chmod(0o500)  # owner read+execute only: the minimum run.sh needs to exec it
     ttnn = tmp_path / "site" / "ttnn"
     (ttnn / "build" / "lib").mkdir(parents=True)
     (ttnn / "__init__.py").write_text("")
