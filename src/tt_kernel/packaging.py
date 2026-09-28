@@ -568,6 +568,12 @@ def render_run_sh(manifest: Manifest) -> str:
     )
     # The tt_transformers adapter reads HF_MODEL from the env (not vLLM's --model), so export it.
     hf_export = f'export HF_MODEL="${{HF_MODEL:-{weights}}}"\n' if weights else ""
+    # The pinned weights revision: vLLM gets it as flags, any other server reads it from the env.
+    weights_rev = manifest.weights.revision if manifest.weights else None
+    if weights_rev:
+        hf_export += (
+            f'export TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{weights_rev}}}"\n'
+        )
     # The TT vLLM backend REQUIRES a supported batch size and a concrete block_size (its default
     # of 256 / None both fail), so always emit them — from the manifest's resources, with the
     # known-good tt_transformers defaults when unset.
@@ -575,6 +581,9 @@ def render_run_sh(manifest: Manifest) -> str:
     max_num_seqs = (res.max_num_seqs if res and res.max_num_seqs else 32)
     block_size = (res.block_size if res and res.block_size else 64)
     serving = f"--max_num_seqs {max_num_seqs} --block_size {block_size}"
+    if weights_rev:
+        rev = shlex.quote(weights_rev)
+        serving += f" --revision {rev} --tokenizer-revision {rev}"
     if res and res.max_model_len:
         serving += f" --max_model_len {res.max_model_len}"
     # Tool/reasoning parsers, if the manifest declares them. Same vLLM flag spelling the
