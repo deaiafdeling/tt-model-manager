@@ -968,6 +968,11 @@ def _merge_default_packages(requirements_text: str, defaults: tuple) -> str:
     )
 
 
+# Top-level names a v6 thin bundle writes itself; the runner may not take one of them.
+THIN_RESERVED_NAMES = (REQUIREMENTS, INSTALL_SCRIPT, RUN_SCRIPT, VLLM_OVERRIDES,
+                       "tt_kernel_manifest.json", WHEELS_DIR, METADATA_DIR)
+
+
 _EXACT_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*===?\s*([^\s;,#]+)")
 
 
@@ -1059,10 +1064,14 @@ def stage_thin_package(
         if with_vllm:
             raise ValueError(f'kind={kind!r} serves no vLLM; pass with_vllm=False.')
 
-    staged.mkdir(parents=True, exist_ok=True)
-
     # The runner, copied to the bundle root under its own name so `--main-class <module>:<Class>`
-    # resolves it via PYTHONPATH=$HERE at serve time.
+    # resolves it via PYTHONPATH=$HERE at serve time. It must not shadow a file tt-model writes.
+    if Path(model_py).name in THIN_RESERVED_NAMES:
+        raise ValueError(
+            f"model_py {Path(model_py).name!r} has the same name as a file the bundle generates "
+            f"({', '.join(THIN_RESERVED_NAMES)}); rename the runner."
+        )
+    staged.mkdir(parents=True, exist_ok=True)
     model_dest = staged / Path(model_py).name
     shutil.copy2(model_py, model_dest)
 
