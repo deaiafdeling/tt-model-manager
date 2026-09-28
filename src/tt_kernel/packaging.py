@@ -566,6 +566,8 @@ def render_run_sh(manifest: Manifest) -> str:
     author_env = dict(manifest.env or {})
     # Chips: the operator's TT_METAL_VISIBLE_DEVICES, else the first N of a TT_VISIBLE_DEVICES
     # grant (from whatever scheduler launched us), else the author's --env value, else 0..N-1.
+    # The grant itself is left as granted: narrowing it to part of a p300c board makes tt-metal
+    # treat the visible set as a CUSTOM cluster and abort at mesh open.
     nchips = max(int(manifest.device_count or 1), 1)
     first_n = ",".join(str(i) for i in range(nchips))
     default_chips = author_env.pop("TT_METAL_VISIBLE_DEVICES", None) or first_n
@@ -577,8 +579,6 @@ if [ -z "${{TT_METAL_VISIBLE_DEVICES:-}}" ]; then
       echo "run.sh: this model needs $NCHIPS chip(s) but TT_VISIBLE_DEVICES grants ${{#_GRANT[@]}} ($TT_VISIBLE_DEVICES)" >&2
       exit 1
     fi
-    TT_VISIBLE_DEVICES="$(IFS=,; echo "${{_GRANT[*]:0:$NCHIPS}}")"
-    export TT_VISIBLE_DEVICES
     TT_METAL_VISIBLE_DEVICES="{first_n}"
   else
     TT_METAL_VISIBLE_DEVICES="{default_chips}"
