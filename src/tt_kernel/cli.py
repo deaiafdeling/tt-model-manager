@@ -1408,8 +1408,10 @@ def serve(
     # rather than drop them silently.
     ignored = [f for f, v in (("--profile", profile), ("--device-id", device_id)) if v]
     if ignored:
-        console.note(f"{' and '.join(ignored)} only apply to container packages; {repo_id} is a "
-                     "v5/v6 bundle with one launch config, so they were ignored", marker="•")
+        one = len(ignored) == 1
+        console.note(f"{' and '.join(ignored)} {'applies' if one else 'apply'} only to container "
+                     f"packages; {repo_id} is a v5/v6 bundle with one launch config, so "
+                     f"{'it was' if one else 'they were'} ignored", marker="•")
 
     # An already-installed bundle serves from its own venv. The host toolchain (ttnn/vLLM versions)
     # is irrelevant — the bundle ships/builds its own — so nothing about the host is checked.

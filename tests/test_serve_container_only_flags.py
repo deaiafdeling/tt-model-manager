@@ -33,7 +33,9 @@ def test_container_only_flags_on_a_bundle_are_reported(installed, flags, named):
     res = _runner.invoke(cli.app, ["serve", _ID, "--local-only", *flags])
     assert res.exit_code == 0, res.output
     out = " ".join(res.output.split())
-    assert "only apply to container packages" in out
+    one = len(named) == 1
+    assert ("applies only to container packages" if one else "apply only to container packages") in out
+    assert ("so it was ignored" if one else "so they were ignored") in out
     for f in named:
         assert f in out
 
@@ -41,4 +43,4 @@ def test_container_only_flags_on_a_bundle_are_reported(installed, flags, named):
 def test_no_note_without_those_flags(installed):
     res = _runner.invoke(cli.app, ["serve", _ID, "--local-only"])
     assert res.exit_code == 0, res.output
-    assert "only apply to container packages" not in res.output
+    assert "only to container packages" not in res.output
