@@ -968,6 +968,19 @@ def _merge_default_packages(requirements_text: str, defaults: tuple) -> str:
     )
 
 
+_EXACT_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*===?\s*([^\s;,#]+)")
+
+
+def pinned_ttnn_version(requirements_text: str) -> Optional[str]:
+    """The exact ttnn version a requirements file pins (``ttnn==X``, else ``tt-metal-models==X``)."""
+    pins: Dict[str, str] = {}
+    for line in requirements_text.splitlines():
+        m = _EXACT_PIN.match(line.split("#", 1)[0].strip())
+        if m:
+            pins[re.sub(r"[-_.]+", "-", m.group(1).lower())] = m.group(2)
+    return pins.get("ttnn") or pins.get("tt-metal-models")
+
+
 def stage_thin_package(
     staged: Path,
     *,
@@ -1178,5 +1191,6 @@ __all__ = [
     "render_run_sh",
     "stage_package",
     "stage_thin_package",
+    "pinned_ttnn_version",
     "StagingError",
 ]
