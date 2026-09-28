@@ -1199,6 +1199,12 @@ def _refresh_self_contained(
 SERVE_PID_FILE = ".serve.pid"
 
 
+def _install_root(entry: dict) -> Path:
+    """The install folder serve and stop both key the PID file on (run.sh may be nested in it)."""
+    return Path(entry.get("install_dir") or entry.get("bundle_path")
+                or Path(entry.get("run_script") or "").parent)
+
+
 def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None) -> None:
     """Serve a v5 self-contained bundle by running its own ``run.sh`` in its own venv.
 
@@ -1217,7 +1223,7 @@ def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional
         subprocess.run(argv, env={**os.environ, "TT_MODEL_PRINT": "1"})
         return
     # run.sh execs the server, so the PID bash writes here is the server's own.
-    pid_file = Path(run_script).parent / SERVE_PID_FILE
+    pid_file = _install_root(entry) / SERVE_PID_FILE
     argv = ["bash", "-c", 'echo $$ > "$0" && exec "$@"', str(pid_file), *argv]
     try:
         raise typer.Exit(code=subprocess.run(argv).returncode)
@@ -1240,7 +1246,7 @@ def _stop_self_contained(entry: dict) -> None:
     import signal
     import time
 
-    install = Path(entry.get("install_dir") or entry.get("bundle_path") or "")
+    install = _install_root(entry)
     pid_file = install / SERVE_PID_FILE
     try:
         pid = int(pid_file.read_text().strip())
