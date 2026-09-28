@@ -37,7 +37,9 @@ and go straight to launch. For a v5.1 container package, `serve` runs the image 
 **Pass-through rule.** `--port`, `--print`, `--local-only`, `--force`, `--arch`, `--profile`,
 `--detach`, `--no-weights`, `--refresh`, `--no-update-check`, and `--device-id` are `serve`'s
 own options and can appear before or after the bundle id. Anything else after the id passes through to vLLM unchanged. This rule is the
-same for every package format.
+same for every package format. `--profile` and `--device-id` act only on a v5.1 container
+package; a v5/v6 bundle has one launch config, so `serve` ignores them there and prints a note
+saying so.
 
 `serve` also compares the installed revision to the Hub's tip and prints a non-blocking
 advisory if a newer one exists. Skip it with `--no-update-check`, `--local-only`, or a pinned
