@@ -513,7 +513,8 @@ def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="",
 
 def test_a_clean_sigterm_stop_does_not_reset_the_mesh(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="0")
-    assert container.stop("c", image="img") is True
+    outcome = container.stop("c", image="img")
+    assert outcome.clean is True and outcome.reset == "not_needed"
     assert not any("--entrypoint" in c for c in calls)
     stop_cmd = next(c for c in calls if c[:2] == ["docker", "stop"])
     assert stop_cmd[stop_cmd.index("--timeout") + 1] == str(container.STOP_TIMEOUT_S)
@@ -523,7 +524,8 @@ def test_a_sigkilled_container_triggers_a_mesh_reset(monkeypatch):
     """137 means the grace period expired: the mesh was never closed, eth cores are
     dirty, and the NEXT boot fails unless it is reset now."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
-    assert container.stop("c", image="img") is False
+    outcome = container.stop("c", image="img")
+    assert outcome.clean is False and outcome.reset == "ran"
     assert any("--entrypoint" in c for c in calls)
 
 
@@ -532,7 +534,7 @@ def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
     reset a SIBLING container's live mesh. The ids come from the label stop() reads back."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0,1")
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert [reset[i + 1] for i, a in enumerate(reset) if a == "--device"] == [
         "/dev/tenstorrent/0:/dev/tenstorrent/0",
@@ -546,7 +548,8 @@ def test_a_chip_taken_since_the_removal_is_not_reset_under_the_new_owner(monkeyp
     runs. Resetting then would wipe a LIVE mesh -- skipping is the recoverable failure."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0,1", now_claimed=[1])
-    assert container.stop("c", image="img") is False
+    outcome = container.stop("c", image="img")
+    assert outcome.clean is False and outcome.reset == "skipped"
     assert not any("--entrypoint" in c for c in calls), "reset a chip someone else now holds"
 
 
@@ -555,7 +558,7 @@ def test_a_chip_still_free_at_teardown_is_reset_as_usual(monkeypatch):
     reason to leave our own dirty mesh unrecovered."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0", now_claimed=[3])
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert reset[reset.index("--device") + 1] == "/dev/tenstorrent/0:/dev/tenstorrent/0"
 
@@ -565,7 +568,7 @@ def test_a_malformed_devices_label_falls_back_instead_of_narrowing_the_reset(mon
     whole-directory fallback is over-broad but never leaves a chip unrecovered."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0,garbage")
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
 
@@ -574,16 +577,35 @@ def test_a_dirty_stop_without_a_devices_label_falls_back_to_the_whole_directory(
     """A container from before the label existed (or one started by hand) still has to be
     recoverable -- there is no id to scope to, so the old behaviour is the fallback."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
+
+
+def test_a_failed_tt_smi_reset_is_reported_as_still_dirty(monkeypatch):
+    """#107: the reset can run and still not recover the device, but it can also just fail
+    (nonzero exit / timeout). stop() must distinguish 'ran' from 'failed' -- the mesh is
+    definitely still dirty in the second case, and the caller says 'reboot', not 'attempted'."""
+    _fake_docker(monkeypatch, running_state="true", exit_code="137", devices_label="0")
+    monkeypatch.setattr(container, "reset_mesh", lambda image, device_ids=None: False)
+    outcome = container.stop("c", image="img")
+    assert outcome.clean is False and outcome.reset == "failed"
+
+
+def test_a_dirty_stop_without_an_image_cannot_reset(monkeypatch):
+    """No image to run tt-smi from -> the dirty mesh could not be reset at all; report it as
+    unrecovered rather than silently returning as if nothing needed doing."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137", devices_label="0")
+    outcome = container.stop("c")  # no image
+    assert outcome.clean is False and outcome.reset == "failed"
+    assert not any("--entrypoint" in c for c in calls)
 
 
 def test_an_uninspectable_container_is_still_stopped_and_removed(monkeypatch):
     """A failed inspect means "we could not read its state", not "there is nothing there":
     the stop and the removal still have to run, just without a scoped reset to aim."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137", inspect_rc=1)
-    assert container.stop("c", image="img") is True
+    assert container.stop("c", image="img").clean is True
     assert any(c[:2] == ["docker", "stop"] for c in calls)
     assert any(c[:2] == ["docker", "rm"] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
@@ -591,7 +613,7 @@ def test_an_uninspectable_container_is_still_stopped_and_removed(monkeypatch):
 
 def test_an_already_stopped_container_is_just_removed(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="false", exit_code="")
-    assert container.stop("c", image="img") is True
+    assert container.stop("c", image="img").clean is True
     assert any(c[:3] == ["docker", "rm", "c"] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
 
@@ -963,3 +985,29 @@ def test_running_matches_the_container_name_exactly(monkeypatch):
         "tt-model-my-model-p300x2"
     ]
     assert [r["name"] for r in container.running()] == ["tt-model-my-model-p300x2"]
+
+
+def test_the_plugin_kind_hands_vllm_the_pinned_weights_revision():
+    """pull downloads the pinned sha, which leaves snapshots/<sha>/ and no refs/main in the
+    HF cache. The container is offline and names the weights by repo id, so vLLM 0.26's
+    argument-time snapshot_download looked for refs/main and died with
+    LocalEntryNotFoundError over a complete cache (changh95/qwen3.8-27b-p150x2, 2026 Sep 25).
+    The sha has to reach vLLM, not just the download."""
+    sha = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    m = _wire(weights={"repo": "org/Weights-7B", "revision": sha})
+    argv = launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    assert argv[:5] == ["vllm", "serve", "org/Weights-7B", "--revision", sha]
+
+
+def test_the_fork_kind_forwards_the_pinned_weights_revision_to_the_server():
+    sha = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    m = _wire(**FORK, weights={"repo": "org/Weights-7B", "revision": sha})
+    argv = launcher_for("vllm-fork").serve_argv(m, m.container.resolve_profile())
+    extra = shlex.split(argv[argv.index("--additional-server-args") + 1])
+    assert extra[:2] == ["--revision", sha]
+
+
+def test_an_unpinned_weights_id_adds_no_revision_flag():
+    m = _wire()
+    assert "--revision" not in launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    assert "--revision" not in " ".join(launcher_for("vllm-fork").serve_argv(_wire(**FORK), _wire(**FORK).container.resolve_profile()))

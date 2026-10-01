@@ -276,6 +276,22 @@ def pull_dir(repo_id: str) -> Path:
     return compat.cache_dir() / "pulled" / repo_id.replace("/", "__")
 
 
+def _image_is_current(have: Optional[str], want: Optional[str], entry: Optional[dict]) -> bool:
+    """Is the image under the tag the one this package records?
+
+    docker's image id is the config digest on the classic store but the manifest digest on
+    the containerd store, so ``have == want`` fails on every containerd host for a package
+    built on a classic one (and vice versa). The id this daemon gave the image when pull
+    loaded it is recorded and accepted too, as long as the package digest is unchanged.
+    """
+    if have is None:
+        return False
+    if want is None or have == want:
+        return True
+    return bool(entry) and entry.get("image_digest") == want \
+        and entry.get("image_loaded_id") == have
+
+
 def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
                    no_weights: bool = False) -> None:
     """Snapshot the repo, load the image into docker, and put weights in the HOST cache."""
@@ -292,6 +308,7 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     # the previous image while reporting success.
     want = spec.image.digest
     have = container.loaded_digest(ref)
+    prior = localdb.get(repo_id)
     if want is None:
         # Published before digest identity. Everything still works — the comparison below
         # degrades to the old tag-presence test — but the protection this exists to give is
@@ -302,12 +319,12 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
             "detection",
             marker="○",
         )
-    if have is not None and (want is None or have == want):
+    if _image_is_current(have, want, prior):
         console.note(f"image {ref} already loaded", marker="•")
     elif spec.image.is_hub_hosted:
-        if have is not None and want is not None and have != want:
+        if have is not None and want is not None:
             console.note(
-                f"{ref} is loaded but is a different image than this package records "
+                f"{ref} is loaded but is not known to be the image this package records "
                 f"({have[7:19]} vs {want[7:19]}) — reloading",
                 marker="○",
             )
@@ -331,6 +348,8 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
         # "arch=None install=None", which found it but described nothing.
         "arch": manifest.arch,
         "image_digest": spec.image.digest,
+        # what THIS daemon calls the image, for _image_is_current on the next pull/serve
+        "image_loaded_id": container.loaded_digest(ref),
         "profile": spec.resolved_default(),
         "profiles": spec.profile_names(),
     })
@@ -873,6 +892,9 @@ def load_pulled(repo_id: str) -> Optional[Manifest]:
     path = pull_dir(repo_id) / MANIFEST_NAME
     if not path.is_file():
         return None
+    entry = localdb.get(repo_id)
+    if entry is not None and not entry.get("container"):
+        return None  # a later v5/v6 pull re-recorded this repo; that install wins
     try:
         m = Manifest.from_json(path.read_text())
     except ValueError:
@@ -1089,7 +1111,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         ref = container.image_ref(manifest)
         want = spec.image.digest
         have = container.loaded_digest(ref)
-        if have is None or (want is not None and have != want):
+        entry = localdb.get(target) if target else None
+        if not _image_is_current(have, want, entry):
             layout = (Path(source) / "image") if source else None
             if layout and (layout / "oci-layout").is_file():
                 with console.step(f"docker load {ref} (image was not loaded)"):
@@ -1103,7 +1126,6 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 # Re-fetch rather than dead-ending. This is NOT an update check -- those
                 # stay opt-in behind --refresh -- so it re-pulls the RECORDED revision,
                 # reproducing the image this manifest describes rather than the Hub tip.
-                entry = localdb.get(target) if target else None
                 repairable = (
                     bool(target) and not local_only and spec.image.is_hub_hosted
                     and bool(entry) and not Path(str(target)).exists()
@@ -1325,26 +1347,58 @@ def _live_containers(manifest: Manifest, profile_name: Optional[str] = None) -> 
     return [n for n in names if container.is_running(n)]
 
 
+# The one-line step detail per StopOutcome.reset (see container.StopOutcome).
+_STOP_DETAIL = {
+    "not_needed": "clean shutdown",
+    "ran": "killed — mesh reset ran",
+    "failed": "killed — mesh reset did NOT complete",
+    "skipped": "killed — reset skipped (chips reclaimed)",
+}
+
+# The dirty-teardown warning, per reset outcome. NONE of these say "the next boot is safe":
+# on a force-killed teardown `tt-smi -r` does not reliably recover the device — the next boot
+# then wedges on the first large host→device DMA (`could only pin N of M pages` in dmesg) until
+# the HOST is rebooted (issue #107). What differs is how much we actually know:
+#   - ran     -> the reset command completed, but that is not a guarantee (see above);
+#   - failed  -> the reset itself did not complete, so the mesh is definitely still dirty;
+#   - skipped -> we deliberately did not reset, because another container now holds these chips.
+# Reporting "a reset was attempted" for the skipped/failed cases (the old behaviour) sent people
+# debugging the model instead of the device — the exact failure #107 is about.
+_DIRTY_STOP_WARNING = {
+    "ran": (
+        "the server did not exit on SIGTERM, so the mesh was left dirty; tt-smi -r ran to reset "
+        "it. A force-killed teardown can still leave the device unusable until the HOST is "
+        "rebooted (see issue #107) — if the next boot hangs early (dmesg: 'could only pin N of M "
+        "pages'), reboot rather than retrying"
+    ),
+    "failed": (
+        "the server did not exit on SIGTERM AND the tt-smi -r reset did not complete, so the mesh "
+        "is still dirty (see issue #107). Reboot the HOST before the next boot — retrying will "
+        "wedge at device open"
+    ),
+    "skipped": (
+        "the server did not exit on SIGTERM, so its mesh was left dirty — it was NOT reset "
+        "because another container has since claimed these chips and resetting would wedge THAT "
+        "one (see issue #107). Stop the other container and reset, or reboot the HOST before "
+        "reusing these chips"
+    ),
+}
+
+
+def _warn_dirty_stop(reset: str) -> None:
+    console.note(_DIRTY_STOP_WARNING.get(reset, _DIRTY_STOP_WARNING["failed"]),
+                 marker="⚠", style="warning")
+
+
 def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:
     stopped = 0
     for name in _live_containers(manifest, profile_name):
         stopped += 1
         with console.step(f"stopping {name}") as st:
-            clean = container.stop(name, image=container.image_ref(manifest))
-            st.detail("clean shutdown" if clean else "killed — mesh reset attempted")
-        if not clean:
-            # Deliberately not "the next boot is safe" (issue #107): on a force-killed
-            # teardown `tt-smi -r` does NOT reliably recover the device — boots then wedge on
-            # the first large host→device DMA (`could only pin N of M pages`) until the host
-            # is rebooted. Promising a repair that may not have happened sends people
-            # debugging the model instead of the device.
-            console.note(
-                "the server did not exit on SIGTERM, so the mesh was left dirty. A reset was "
-                "attempted with tt-smi, but a force-killed teardown can leave the device "
-                "unusable until the HOST is rebooted (see issue #107) — if the next boot "
-                "hangs early, reboot rather than retrying",
-                marker="⚠", style="warning",
-            )
+            outcome = container.stop(name, image=container.image_ref(manifest))
+            st.detail(_STOP_DETAIL.get(outcome.reset, "killed — mesh reset"))
+        if not outcome.clean:
+            _warn_dirty_stop(outcome.reset)
     if not stopped:
         console.note("nothing running", marker="○")
     else:
@@ -1372,7 +1426,7 @@ def describe_pulled(entry: dict) -> dict:
     ref = entry.get("image") or "?"
     want = entry.get("image_digest")
     have = container.loaded_digest(ref) if ref != "?" else None
-    loaded = have is not None and (want is None or have == want)
+    loaded = _image_is_current(have, want, entry)
     size = ""
     if loaded:
         out = container.run_or_empty(

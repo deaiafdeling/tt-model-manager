@@ -713,18 +713,53 @@ def test_ready_card_suggests_a_curl_that_actually_parses(capsys):
 
 def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "is_running", lambda name: True)
-    monkeypatch.setattr(container, "stop", lambda name, image=None: True)
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None: container.StopOutcome(True, "not_needed"))
     container_cli.stop_container(_manifest(tmp_path))
     out = capsys.readouterr().out
     assert "stopped 1" in out
     assert "mesh" not in out.lower()
 
 
-def test_stop_warns_loudly_when_a_kill_forced_a_mesh_reset(tmp_path, monkeypatch, capsys):
+def _stub_stop(monkeypatch, reset):
     monkeypatch.setattr(container, "is_running", lambda name: True)
-    monkeypatch.setattr(container, "stop", lambda name, image=None: False)
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None: container.StopOutcome(False, reset))
+
+
+def test_a_reset_that_ran_is_reported_without_promising_the_next_boot_is_safe(
+        tmp_path, monkeypatch, capsys):
+    """#107: even a tt-smi -r that returned success is NOT a guarantee — a force-kill can
+    leave the device wedged until a host reboot. Say the reset ran, name the symptom + the
+    real remedy, and never say 'the next boot is safe'."""
+    _stub_stop(monkeypatch, "ran")
     container_cli.stop_container(_manifest(tmp_path))
-    assert "mesh was left dirty" in capsys.readouterr().out
+    out = " ".join(capsys.readouterr().out.split())  # console wraps; compare unwrapped
+    assert "the next boot is safe" not in out
+    assert "tt-smi -r ran" in out
+    assert "could only pin" in out and "reboot" in out and "issue #107" in out
+
+
+def test_a_failed_reset_says_the_mesh_is_still_dirty_and_to_reboot(tmp_path, monkeypatch, capsys):
+    """The old code reported a failed reset exactly like a successful one. If tt-smi -r did
+    NOT complete, the mesh is definitely still dirty — say reboot, not 'a reset was attempted'."""
+    _stub_stop(monkeypatch, "failed")
+    container_cli.stop_container(_manifest(tmp_path))
+    out = " ".join(capsys.readouterr().out.split())  # console wraps; compare unwrapped
+    assert "did not complete" in out and "still dirty" in out
+    assert "Reboot the HOST" in out
+    assert "the next boot is safe" not in out
+
+
+def test_a_skipped_reset_does_not_claim_a_reset_was_attempted(tmp_path, monkeypatch, capsys):
+    """When a sibling reclaimed the chips the reset is deliberately NOT run. The old message
+    said 'a reset was attempted with tt-smi' — false. Say it was skipped and why."""
+    _stub_stop(monkeypatch, "skipped")
+    container_cli.stop_container(_manifest(tmp_path))
+    out = " ".join(capsys.readouterr().out.split())  # console wraps; compare unwrapped
+    assert "NOT reset" in out and "another container" in out
+    assert "attempted" not in out.lower()
+    assert "the next boot is safe" not in out
 
 
 def test_stopping_nothing_says_so_rather_than_failing(tmp_path, monkeypatch, capsys):
@@ -781,7 +816,8 @@ def test_stop_without_profile_stops_only_what_is_running_and_says_so(
         tmp_path, monkeypatch, capsys):
     m = _two_containers(tmp_path, monkeypatch, running={"tt-model-my-model-p150x2"})
     stopped = []
-    monkeypatch.setattr(container, "stop", lambda name, image=None: stopped.append(name) or True)
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None: stopped.append(name) or container.StopOutcome(True))
     container_cli.stop_container(m)
     assert stopped == ["tt-model-my-model-p150x2"]
     assert "stopped 1" in capsys.readouterr().out
@@ -1781,6 +1817,109 @@ def test_a_digest_bearing_package_says_nothing_about_it(tmp_path, monkeypatch, c
     monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: Path("/w"))
     container_cli.pull_container("org/x", None, m, no_weights=True)
     assert "no image digest" not in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ containerd image store
+#
+# docker's image id is the config digest on the classic store and the manifest digest on the
+# containerd store (Docker >= 28 default). A package records the builder's id, so on a host
+# with the other store `have == want` never holds and every pull/serve re-downloaded the
+# multi-GB image with a "different image" note. The id the local daemon assigns at load is
+# recorded and accepted while the package digest is unchanged.
+
+CONFIG_DIGEST = "sha256:" + "c" * 64          # what the classic-store builder recorded
+MANIFEST_ID = "sha256:" + "m" * 64            # what a containerd-store consumer reports
+
+
+def _containerd_pull(tmp_path, monkeypatch, m):
+    """Wire pull_container to a daemon that reports MANIFEST_ID once something is loaded."""
+    from tt_kernel import oci
+
+    state = {"id": None}
+    loads = []
+
+    def fake_load(src, expect_tag=None):
+        loads.append(src)
+        state["id"] = MANIFEST_ID
+
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: state["id"])
+    monkeypatch.setattr(oci, "load", fake_load)
+    monkeypatch.setattr(container_cli.hub, "download_bundle",
+                        lambda repo, rev, dest=None: Path(dest))
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: Path("/w"))
+    return state, loads
+
+
+def test_pull_on_the_containerd_store_records_the_daemons_id_and_skips_the_next_reload(
+        tmp_path, monkeypatch, capsys):
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    m.container.image.digest = CONFIG_DIGEST
+    state, loads = _containerd_pull(tmp_path, monkeypatch, m)
+
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert loads == [Path(loads[0])] and len(loads) == 1
+    assert localdb.get("org/x")["image_loaded_id"] == MANIFEST_ID
+    assert localdb.get("org/x")["image_digest"] == CONFIG_DIGEST
+
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert len(loads) == 1                               # not reloaded
+    out = " ".join(capsys.readouterr().out.split())
+    assert "already loaded" in out
+
+
+def test_a_republished_package_still_reloads_on_the_containerd_store(tmp_path, monkeypatch):
+    """The recorded daemon id only vouches for the package digest it was loaded from."""
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    m.container.image.digest = "sha256:" + "d" * 64        # republished: new digest
+    localdb.record("org/x", {"repo_id": "org/x", "container": True,
+                             "image": container.image_ref(m),
+                             "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    state, loads = _containerd_pull(tmp_path, monkeypatch, m)
+    state["id"] = MANIFEST_ID                             # the old image is still loaded
+
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert len(loads) == 1
+
+
+def test_serve_accepts_the_recorded_daemon_id_instead_of_repulling(tmp_path, monkeypatch):
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    m.container.image.digest = CONFIG_DIGEST
+    localdb.record("org/m", {"repo_id": "org/m", "container": True,
+                             "image": container.image_ref(m),
+                             "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: MANIFEST_ID)
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: pytest.fail("must not re-pull a loaded image"))
+    ran = []
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda mm: None)
+
+    container_cli.serve_container(m, target="org/m")
+    assert ran and ran[0][:2] == ["docker", "run"]
+
+
+def test_describe_pulled_is_ready_with_the_recorded_daemon_id(monkeypatch):
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: MANIFEST_ID)
+    monkeypatch.setattr(container, "run_or_empty", lambda argv: "10737418240")
+    r = container_cli.describe_pulled(
+        {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole",
+         "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    assert r["ready"] is True and r["why"] == ""
+
+
+def test_describe_pulled_still_flags_a_swapped_image(monkeypatch):
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "z" * 64)
+    r = container_cli.describe_pulled(
+        {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole",
+         "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    assert r["ready"] is False and "different build" in r["why"]
 
 
 # ------------------------------------------------------------------ --refresh
@@ -2883,3 +3022,28 @@ def test_package_emits_the_card_warning_at_its_call_site(
     container_cli.package_container(str(tmp_path / "tt-model.yaml"))
     printed = capsys.readouterr().out
     assert ("the model card has no card." in printed) is warned, printed
+
+
+# ------------------------------------------- a later v6 pull supersedes a pulled container
+
+
+def test_serve_prefers_a_later_v6_install_over_a_stale_pulled_container(tmp_path, monkeypatch):
+    """A repo republished as a v6 bundle leaves the old pulled container manifest behind.
+    The v6 pull re-records the repo in localdb, and that newest record must win."""
+    from tt_kernel import cli, localdb
+
+    d = container_cli.pull_dir("org/x")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "tt_kernel_manifest.json").write_text(_manifest(tmp_path).to_json())
+    localdb.record("org/x", {"repo_id": "org/x", "self_contained": True,
+                             "install_dir": str(tmp_path), "run_script": str(tmp_path / "run.sh")})
+    served = []
+    monkeypatch.setattr(cli, "_serve_self_contained",
+                        lambda entry, **kw: served.append(entry["repo_id"]))
+    monkeypatch.setattr(container_cli, "serve_container",
+                        lambda *a, **k: pytest.fail("served the stale container"))
+
+    res = runner.invoke(cli.app, ["serve", "org/x", "--local-only"])
+    assert res.exit_code == 0, res.output
+    assert served == ["org/x"]
+    assert container_cli.resolve_target("org/x") is None
