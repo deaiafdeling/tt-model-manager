@@ -930,7 +930,11 @@ class HttpServerLauncher:
     # says when it is serving, and ``runtime.ready_line`` pins what that looks like.
     # The default matches the structured-JSON event form ("{"event": "ready", ...}")
     # the tt-metal model servers log; override it for a server that logs otherwise.
+    # the log substring that marks this server's boot as done, as a CLASS attribute:
+    # build.py's generated README consumes `launcher.READY_LINE` for every kind. The
+    # manifest's runtime.ready_line overrides it per package (see ready_probe).
     DEFAULT_READY_LINE = '"event": "ready"'
+    READY_LINE = DEFAULT_READY_LINE
 
     # how the card describes what ``serve`` starts. Conservative by default: the kind
     # knows nothing about the API surface, so it claims nothing. A server that IS
