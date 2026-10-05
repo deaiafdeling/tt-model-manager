@@ -973,19 +973,6 @@ class HttpServerLauncher:
                 '--host, "{host}", --port, "{port}"].'
             )
 
-        # The script (or module file) the command names must ship, or the image boots
-        # into a FileNotFoundError on the author's machine instead of here.
-        for arg in command:
-            if arg.endswith(".py") and "/" in arg:
-                top = arg.split("/")[0]
-                if not any(c.split("/")[0] == top for c in m.source.all_code_paths):
-                    raise ContainerManifestError(
-                        f"runtime.command runs {arg!r}, which no allowlist entry "
-                        "ships. Add the directory holding it to source.code (if it lives "
-                        "in the tt-metal tree) or to source.extra_code (if it does not)."
-                    )
-                break
-
         placeholders = {
             token for arg in command for token in re.findall(r"\{[a-z_]+\}", arg)
         }
@@ -1000,6 +987,24 @@ class HttpServerLauncher:
                 "runtime.command never names {port} — the command would ignore the "
                 "profile's port and the readiness probe would watch the wrong one."
             )
+
+        # Every arg that looks like a shipped script must be covered by the allowlist, or
+        # the image boots into a FileNotFoundError on the author's machine instead of here.
+        # "Looks like a shipped path": ends .py or .sh and is a bare path (no spaces — a
+        # spaced arg is a shell snippet, not a file), at ANY depth (the common top-level
+        # server.py has no slash, and bash serve.sh is a real launch shape). Runs after
+        # the placeholder checks: those are the author's primary errors, and the two
+        # minimal-command golden tests expect them first.
+        for arg in command:
+            if not (arg.endswith(".py") or arg.endswith(".sh")) or " " in arg:
+                continue
+            top = arg.split("/")[0]
+            if not any(c.split("/")[0] == top for c in m.source.all_code_paths):
+                raise ContainerManifestError(
+                    f"runtime.command runs {arg!r}, which no allowlist entry "
+                    "ships. Add the directory holding it to source.code (if it lives "
+                    "in the tt-metal tree) or to source.extra_code (if it does not)."
+                )
 
         ready_line = rt.get("ready_line")
         if ready_line is not None and (
@@ -1061,7 +1066,15 @@ class HttpServerLauncher:
             "{host}": "0.0.0.0",  # containers bind every interface; the publish scopes reach
             "{port}": str(profile.port or DEFAULT_PORT),
         }
-        argv = [values.get(a, a) for a in command]
+        # Substitute WITHIN each arg, not only whole-arg matches: validate() accepts the
+        # embedded form ("--port={port}"), so serving it literally would be exactly the
+        # discover-it-ten-minutes-into-a-boot failure this kind exists to prevent. A
+        # whole-arg placeholder is the same replacement under token replace.
+        argv = []
+        for arg in command:
+            for token, value in values.items():
+                arg = arg.replace(token, value)
+            argv.append(arg)
         argv += profile.flat_args()
         return argv
 

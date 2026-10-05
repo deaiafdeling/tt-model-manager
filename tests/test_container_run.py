@@ -395,6 +395,55 @@ def test_http_server_without_a_command_is_refused():
         _wire(**{**HTTP, "runtime": {}})
 
 
+def test_http_server_serves_embedded_placeholders():
+    """``--port={port}`` is the common authoring shape (validate() accepts it), so it must
+    serve SUBSTITUTED — a literal ``--port={port}`` at boot is the failure this kind exists
+    to prevent."""
+    m = _wire(
+        **{
+            **HTTP,
+            "runtime": {
+                "command": [
+                    "python", "models/demos/my_model/tools/server.py",
+                    "--host={host}", "--port={port}",
+                ]
+            },
+        }
+    )
+    p = m.container.resolve_profile()
+    assert launcher_for("http-server").serve_argv(m, p) == [
+        "python", "models/demos/my_model/tools/server.py",
+        "--host=0.0.0.0", "--port=8000",
+    ]
+
+
+def test_http_server_allowlist_covers_top_level_scripts():
+    """The check is not slash-gated: the common top-level ``server.py`` is under the same
+    must-ship contract as a nested one."""
+    cmd = ["python", "server.py", "--port", "{port}"]
+    with pytest.raises(ContainerManifestError, match="no allowlist entry"):
+        _wire(**{**HTTP, "runtime": {"command": cmd}})
+    m = _wire(
+        **{**HTTP, "source": {**BASE["source"], "code": ["server.py"]}, "runtime": {"command": cmd}}
+    )
+    assert launcher_for("http-server").serve_argv(m, m.container.resolve_profile())[1] == "server.py"
+
+
+def test_http_server_allowlist_covers_shell_launchers():
+    """``bash serve.sh`` is a real launch shape; serve.sh must ship too."""
+    cmd = ["bash", "serve.sh", "--port", "{port}"]
+    with pytest.raises(ContainerManifestError, match="no allowlist entry"):
+        _wire(**{**HTTP, "runtime": {"command": cmd}})
+    m = _wire(
+        **{
+            **HTTP,
+            "source": {**BASE["source"], "code": ["models/common", "serve.sh"]},
+            "runtime": {"command": cmd},
+        }
+    )
+    assert launcher_for("http-server").serve_argv(m, m.container.resolve_profile())[1] == "serve.sh"
+
+
 def test_http_server_with_an_unknown_placeholder_is_refused():
     bad = ["python", "s.py", "--port", "{port}", "--mesh", "{mesh}"]
     with pytest.raises(ContainerManifestError, match="unknown placeholder"):
